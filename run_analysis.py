@@ -1,0 +1,114 @@
+"""主流程：python run_analysis.py 一键复现全部结果。
+
+产出（全部落到 reports/）：
+1. 每个资产：4策略 vs Buy&Hold 的指标对比表 + 净值曲线图
+2. SPY 的 MA 参数敏感性热力图
+3. SPY 的 walk-forward 结果表
+4. block bootstrap 显著性检验
+5. 分市场环境 Sharpe 表
+"""
+from pathlib import Path
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import pandas as pd
+
+import config as C
+from backtest import backtest_portfolio, backtest_single
+from data import load_prices, sanity_check
+from metrics import summary
+from signals import ma_crossover, tsmom, vol_target, xs_momentum
+from stats_tests import (block_bootstrap_sharpe_diff, ma_param_grid,
+                         regime_table, walk_forward)
+
+OUT = Path("reports")
+OUT.mkdir(exist_ok=True)
+
+
+def strategies_for_asset(prices: pd.Series, returns: pd.Series) -> dict:
+    """给单个资产跑全部策略，返回 {策略名: 净日收益}。"""
+    ma_pos = ma_crossover(prices, 20, 100)
+    ts_pos = tsmom(prices, C.TSMOM_LOOKBACK)
+    vt_pos = vol_target(ts_pos, returns, C.VOL_TARGET, C.VOL_WINDOW, C.VOL_CAP)
+
+    return {
+        "Buy&Hold": returns,
+        "MA 20/100": backtest_single(returns, ma_pos, C.COST)["net"],
+        "TSMOM 12m": backtest_single(returns, ts_pos, C.COST)["net"],
+        "TSMOM + VolTarget": backtest_single(returns, vt_pos, C.COST)["net"],
+    }
+
+
+def main():
+    prices = load_prices(C.TICKERS, C.START)
+    sanity_check(prices)
+    returns = prices / prices.shift(1) - 1
+
+    # ---------- 1. 每个资产的策略对比 ----------
+    all_results = {}
+    for t in C.TICKERS:
+        strat_rets = strategies_for_asset(prices[t], returns[t])
+        all_results[t] = strat_rets
+        tbl = summary(strat_rets, C.RF)
+        tbl.to_csv(OUT / f"summary_{t}.csv")
+        print(f"\n===== {t} =====\n{tbl}")
+
+        wealth = pd.DataFrame({k: (1 + v.fillna(0)).cumprod() for k, v in strat_rets.items()})
+        wealth.plot(figsize=(11, 5), title=f"{t}: Growth of $1 (net of costs)")
+        plt.ylabel("Wealth")
+        plt.tight_layout()
+        plt.savefig(OUT / f"wealth_{t}.png", dpi=150)
+        plt.close()
+
+    # ---------- 2. 横截面动量（组合层）----------
+    xs_w = xs_momentum(prices, C.XS_LOOKBACK, C.XS_TOP_N)
+    xs_net = backtest_portfolio(returns, xs_w, C.COST)["net"]
+    ew_bench = returns.mean(axis=1)  # 等权持有5资产作为组合基准
+    xs_tbl = summary({"EqualWeight B&H": ew_bench, "XS Momentum top2": xs_net}, C.RF)
+    xs_tbl.to_csv(OUT / "summary_xs_momentum.csv")
+    print(f"\n===== Cross-sectional momentum (portfolio) =====\n{xs_tbl}")
+
+    # ---------- 3. SPY 深挖：热力图 / walk-forward / bootstrap ----------
+    spy_p, spy_r = prices["SPY"], returns["SPY"]
+
+    grid = ma_param_grid(spy_p, spy_r, C.MA_FASTS, C.MA_SLOWS, C.COST)
+    grid.to_csv(OUT / "spy_ma_param_grid.csv")
+    print(f"\n===== SPY MA param sensitivity (net Sharpe) =====\n{grid}")
+    fig, ax = plt.subplots(figsize=(6, 4))
+    im = ax.imshow(grid.values.astype(float), cmap="RdYlGn")
+    ax.set_xticks(range(len(grid.columns)), grid.columns)
+    ax.set_yticks(range(len(grid.index)), grid.index)
+    ax.set_xlabel("slow MA"); ax.set_ylabel("fast MA")
+    ax.set_title("SPY net Sharpe by MA params")
+    for i in range(grid.shape[0]):
+        for j in range(grid.shape[1]):
+            v = grid.iat[i, j]
+            if pd.notna(v):
+                ax.text(j, i, f"{v:.2f}", ha="center", va="center")
+    fig.colorbar(im)
+    plt.tight_layout()
+    plt.savefig(OUT / "spy_ma_heatmap.png", dpi=150)
+    plt.close()
+
+    pairs = [(f, s) for f in C.MA_FASTS for s in C.MA_SLOWS if f < s]
+    wf_tbl, wf_oos = walk_forward(spy_p, spy_r, pairs, cost=C.COST)
+    wf_tbl.to_csv(OUT / "spy_walk_forward.csv", index=False)
+    print(f"\n===== SPY walk-forward =====\n{wf_tbl}")
+
+    boot = block_bootstrap_sharpe_diff(
+        all_results["SPY"]["TSMOM + VolTarget"], spy_r,
+        C.BOOT_BLOCK, C.BOOT_N, C.BOOT_SEED)
+    print(f"\n===== Bootstrap: (TSMOM+VolTarget) Sharpe - (Buy&Hold) Sharpe, SPY =====\n{boot}")
+    pd.Series(boot).to_csv(OUT / "spy_bootstrap.csv")
+
+    # ---------- 4. 分市场环境 ----------
+    reg = regime_table(all_results["SPY"])
+    reg.to_csv(OUT / "spy_regimes.csv")
+    print(f"\n===== SPY Sharpe by market regime =====\n{reg}")
+
+    print(f"\nAll outputs saved to {OUT.resolve()}")
+
+
+if __name__ == "__main__":
+    main()
