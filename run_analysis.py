@@ -1,12 +1,4 @@
-"""主流程：python run_analysis.py 一键复现全部结果。
 
-产出（全部落到 reports/）：
-1. 每个资产：4策略 vs Buy&Hold 的指标对比表 + 净值曲线图
-2. SPY 的 MA 参数敏感性热力图
-3. SPY 的 walk-forward 结果表
-4. block bootstrap 显著性检验
-5. 分市场环境 Sharpe 表
-"""
 from pathlib import Path
 
 import matplotlib
@@ -27,7 +19,7 @@ OUT.mkdir(exist_ok=True)
 
 
 def strategies_for_asset(prices: pd.Series, returns: pd.Series) -> dict:
-    """给单个资产跑全部策略，返回 {策略名: 净日收益}。"""
+
     ma_pos = ma_crossover(prices, 20, 100)
     ts_pos = tsmom(prices, C.TSMOM_LOOKBACK)
     vt_pos = vol_target(ts_pos, returns, C.VOL_TARGET, C.VOL_WINDOW, C.VOL_CAP)
@@ -45,7 +37,6 @@ def main():
     sanity_check(prices)
     returns = prices / prices.shift(1) - 1
 
-    # ---------- 1. 每个资产的策略对比 ----------
     all_results = {}
     for t in C.TICKERS:
         strat_rets = strategies_for_asset(prices[t], returns[t])
@@ -61,7 +52,7 @@ def main():
         plt.savefig(OUT / f"wealth_{t}.png", dpi=150)
         plt.close()
 
-    # ---------- 2. 横截面动量（组合层）----------
+
     xs_w = xs_momentum(prices, C.XS_LOOKBACK, C.XS_TOP_N)
     xs_net = backtest_portfolio(returns, xs_w, C.COST)["net"]
     ew_bench = returns.mean(axis=1)  # 等权持有5资产作为组合基准
@@ -69,7 +60,6 @@ def main():
     xs_tbl.to_csv(OUT / "summary_xs_momentum.csv")
     print(f"\n===== Cross-sectional momentum (portfolio) =====\n{xs_tbl}")
 
-    # ---------- 3. SPY 深挖：热力图 / walk-forward / bootstrap ----------
     spy_p, spy_r = prices["SPY"], returns["SPY"]
 
     grid = ma_param_grid(spy_p, spy_r, C.MA_FASTS, C.MA_SLOWS, C.COST)
@@ -102,7 +92,6 @@ def main():
     print(f"\n===== Bootstrap: (TSMOM+VolTarget) Sharpe - (Buy&Hold) Sharpe, SPY =====\n{boot}")
     pd.Series(boot).to_csv(OUT / "spy_bootstrap.csv")
 
-    # ---------- 4. 分市场环境 ----------
     reg = regime_table(all_results["SPY"])
     reg.to_csv(OUT / "spy_regimes.csv")
     print(f"\n===== SPY Sharpe by market regime =====\n{reg}")
